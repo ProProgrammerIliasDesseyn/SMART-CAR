@@ -1,0 +1,53 @@
+# Foto's maken met de camera van de auto om de AI te trainen.
+# Verbind je laptop eerst met de wifi van de auto (ELEGOO-xxxx).
+ 
+import cv2
+import os
+import time
+ 
+STREAM = "http://192.168.4.1:81/stream"
+ 
+# toets -> naam van de klasse (map)
+KLASSEN = {"l": "links", "r": "rechts", "s": "rechtdoor", "n": "niets"}
+ 
+# mappen aanmaken: dataset/train/... en dataset/val/...
+for klasse in KLASSEN.values():
+    os.makedirs("dataset/train/" + klasse, exist_ok=True)
+    os.makedirs("dataset/val/" + klasse, exist_ok=True)
+ 
+camera = cv2.VideoCapture(STREAM)
+teller = 0
+ 
+print("Druk l (links), r (rechts), s (rechtdoor) of n (niets) om een foto te bewaren.")
+print("Druk q om te stoppen.")
+ 
+while True:
+    ok, beeld = camera.read()
+    if not ok:
+        print("Geen beeld, is je laptop verbonden met de wifi van de auto?")
+        time.sleep(1)
+        continue
+ 
+    cv2.imshow("Camera auto", beeld)
+    toets = chr(cv2.waitKey(1) & 0xFF)
+ 
+    if toets == "q":
+        break
+ 
+    if toets in KLASSEN:
+        klasse = KLASSEN[toets]
+        teller += 1
+ 
+        # elke 5de foto gaat naar 'val' (om te testen), de rest naar 'train' (om te leren)
+        if teller % 5 == 0:
+            deel = "val"
+        else:
+            deel = "train"
+ 
+        bestand = "dataset/" + deel + "/" + klasse + "/" + str(int(time.time() * 1000)) + ".jpg"
+        cv2.imwrite(bestand, beeld)
+        print("Bewaard:", bestand)
+ 
+camera.release()
+cv2.destroyAllWindows()
+ 
