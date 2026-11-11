@@ -1,0 +1,112 @@
+# Verkeersbord herkennen met AI en de richting naar de auto sturen.
+# Bekijk het beeld op: http://localhost:5000
+ 
+import cv2
+import socket
+import threading
+import time
+from flask import Flask, Response
+from ultralytics import YOLO
+ 
+AUTO_IP = "192.168.4.1"
+STREAM = "http://" + AUTO_IP + ":81/stream"
+ZEKERHEID = 0.80                       # AI moet minstens 80% zeker zijn
+ 
+# wat we naar de Arduino sturen per bord
+CODES = {"links": "{L}", "rechts": "{R}", "rechtdoor": "{S}"}
+ 
+# 1. AI-model laden (dat heb je zelf getraind)
+model = YOLO("bord_model.pt")
+ 
+# 2. Verbinden met de auto (poort 100 van de ESP32)
+auto = socket.create_connection((AUTO_IP, 100))
+auto.setblocking(False)
+ 
+ 
+def stuur(tekst):
+    auto.sendall(tekst.encode())
+ 
+ 
+# hier bewaren we het laatste beeld voor de webpagina
+laatste_beeld = None
+slot = threading.Lock()
+ 
+ 
+def ai_lus():
+    global laatste_beeld
+ 
+    camera = cv2.VideoCapture(STREAM)
+    vorige_klasse = ""
+    zelfde_teller = 0
+    laatste_hartslag = 0
+    laatst_gestuurd = 0
+ 
+    while True:
+        # elke seconde een hartslag sturen, anders verbreekt de ESP32 de verbinding
+        if time.time() - laatste_hartslag > 1:
+            stuur("{Heartbeat}")
+            laatste_hartslag = time.time()
+            try:
+                auto.recv(1024)        # berichten van de auto lezen en weggooien
+            except BlockingIOError:
+                pass
+ 
+        ok, beeld = camera.read()
+        if not ok:
+            continue
+ 
+        # AI laten kijken
+        resultaat = model(beeld, verbose=False)[0]
+        klasse = resultaat.names[resultaat.probs.top1]
+        zeker = float(resultaat.probs.top1conf)
+ 
+        # pas sturen als hij 5 beelden na elkaar hetzelfde bord zeker ziet
+        if klasse == vorige_klasse and zeker > ZEKERHEID:
+            zelfde_teller += 1
+        else:
+            zelfde_teller = 0
+        vorige_klasse = klasse
+ 
+        if zelfde_teller >= 5 and klasse in CODES and time.time() - laatst_gestuurd > 0.5:
+            stuur(CODES[klasse])
+            laatst_gestuurd = time.time()
+            print("Gestuurd naar auto:", CODES[klasse])
+ 
+        # tekst op het beeld zetten
+        tekst = klasse + " " + str(round(zeker * 100)) + "%"
+        cv2.putText(beeld, tekst, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+ 
+        with slot:
+            laatste_beeld = beeld
+ 
+ 
+# 3. Webpagina op localhost
+app = Flask(__name__)
+ 
+ 
+def beelden():
+    while True:
+        with slot:
+            beeld = laatste_beeld
+        if beeld is None:
+            time.sleep(0.1)
+            continue
+        ok, jpg = cv2.imencode(".jpg", beeld)
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg.tobytes() + b"\r\n"
+        time.sleep(0.05)
+ 
+ 
+@app.route("/")
+def pagina():
+    return "<h1>Smart car camera</h1><img src='/video' width='640'>"
+ 
+ 
+@app.route("/video")
+def video():
+    return Response(beelden(), mimetype="multipart/x-mixed-replace; boundary=frame")
+ 
+ 
+# AI in de achtergrond starten, webpagina op de voorgrond
+threading.Thread(target=ai_lus, daemon=True).start()
+app.run(host="127.0.0.1", port=5000, threaded=True)
+ 
